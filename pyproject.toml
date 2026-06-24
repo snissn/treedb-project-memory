@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "treedb-project-memory"
+version = "0.1.0"
+description = "Local project-memory tooling scaffold backed by TreeDB and Haystack in future milestones."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "snissn" }
+]
+dependencies = [
+  "typer>=0.12,<1.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9"
+]
+
+[project.scripts]
+treedb-project-memory = "treedb_project_memory.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["treedb_project_memory*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
