@@ -12,7 +12,7 @@ def test_cli_help_smoke() -> None:
     result = CliRunner().invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert "Local project-memory scaffold" in result.output
+    assert "Local project-memory workspace tooling" in result.output
     assert "Show the package version and exit." in result.output
 
 
