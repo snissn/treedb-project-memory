@@ -13,7 +13,7 @@ def test_cli_help_smoke() -> None:
 
     assert result.exit_code == 0
     assert "Local project-memory scaffold" in result.output
-    assert "--version" in result.output
+    assert "Show the package version and exit." in result.output
 
 
 def test_cli_version_smoke() -> None:
