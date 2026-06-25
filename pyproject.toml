@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "treedb-project-memory"
 version = "0.1.0"
-description = "Local project-memory tooling scaffold backed by TreeDB and Haystack in future milestones."
+description = "Local project-memory CLI backed by TreeDB and Haystack integration points."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [

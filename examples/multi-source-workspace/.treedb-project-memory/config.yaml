@@ -1,0 +1,49 @@
+workspace: multi-source-example
+sources:
+  service:
+    type: repo
+    root: ./service
+    include:
+      - "**/*.py"
+      - "**/*.md"
+    exclude:
+      - ".git/**"
+      - ".venv/**"
+    max_file_bytes: 1048576
+    follow_symlinks: false
+  docs:
+    type: folder
+    root: ./docs
+    include:
+      - "**/*.md"
+    exclude: []
+    max_file_bytes: 1048576
+    follow_symlinks: false
+  tickets:
+    type: jsonl
+    root: ./exports/tickets.jsonl
+    include:
+      - "**/*.jsonl"
+    exclude: []
+    max_file_bytes: 1048576
+    follow_symlinks: false
+    content_field: body
+retrieval:
+  default_mode: keyword
+  top_k: 8
+answer_generator:
+  provider: extractive
+  max_context_chunks: 4
+embedding:
+  provider: deterministic
+  model: deterministic-v1
+  dimension: 32
+  batch_size: 32
+treedb:
+  adapter: memory
+  base_url: http://127.0.0.1:7120
+  index: multi_source_example
+  similarity: cosine
+  service_lifecycle: external
+  timeout_seconds: 30.0
+  ensure_index: true
