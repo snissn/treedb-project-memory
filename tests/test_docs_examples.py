@@ -67,3 +67,13 @@ def test_docs_do_not_use_private_demo_paths() -> None:
         text = path.read_text(encoding="utf-8")
         for needle in banned:
             assert needle not in text, f"{needle!r} found in {path}"
+
+
+def test_docs_warn_relative_roots_are_cwd_relative() -> None:
+    concepts = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
+    configuration = (ROOT / "docs" / "configuration.md").read_text(encoding="utf-8")
+    examples = (ROOT / "examples" / "README.md").read_text(encoding="utf-8")
+
+    for text in (concepts, configuration, examples):
+        normalized = " ".join(text.split())
+        assert "current working directory" in normalized

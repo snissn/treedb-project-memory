@@ -72,6 +72,11 @@ sources:
 Valid source types are `repo`, `folder`, `markdown`, `text`, `jsonl`, and
 `file`.
 
+`treedb-project-memory add` writes normalized absolute source roots. If you edit
+`root` manually to a relative path, run commands from the workspace root; current
+source scanning resolves relative roots from the process current working
+directory.
+
 `max_file_bytes` must be a positive integer. `follow_symlinks` must be a
 boolean. `content_field` is used only for JSONL sources.
 

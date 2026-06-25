@@ -1,7 +1,9 @@
 # Examples
 
 These example workspaces use generic local content and relative roots. They are
-intended for docs, tests, and quick inspection.
+intended for docs, tests, and quick inspection. Relative roots are resolved from
+the process current working directory, so run commands from the example
+workspace root.
 
 Run one from its example directory:
 

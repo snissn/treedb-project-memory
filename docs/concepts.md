@@ -24,8 +24,11 @@ export. `treedb-project-memory add` records source configuration only. It does
 not read file content or write index state.
 
 Source roots may be edited manually, but the CLI writes normalized absolute
-paths when adding a source. Examples use relative paths so they can be copied
-and inspected without depending on one machine.
+paths when adding a source. Relative roots are currently resolved from the
+process current working directory, not automatically from the discovered
+workspace root. The checked-in examples use relative roots so they can be
+copied and inspected without depending on one machine; run those example
+commands from the example workspace root.
 
 ## Documents And Chunks
 
