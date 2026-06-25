@@ -104,11 +104,7 @@ def index_workspace(
 
         for path, planned in sorted(planned_files.items()):
             previous = previous_files.get(path)
-            if (
-                previous is not None
-                and previous.document_hash == planned.document_hash
-                and previous.chunk_ids == planned.chunk_ids
-            ):
+            if _planned_file_unchanged(previous, planned):
                 unchanged_paths.append(path)
                 continue
             changed_paths.append(path)
@@ -238,11 +234,7 @@ def status_workspace(
             deleted_paths = sorted(path for path in previous_files if path not in planned_files)
         for path, planned in sorted(planned_files.items()):
             previous = previous_files.get(path)
-            if (
-                previous is not None
-                and previous.document_hash == planned.document_hash
-                and previous.chunk_ids == planned.chunk_ids
-            ):
+            if _planned_file_unchanged(previous, planned):
                 unchanged_paths.append(path)
             else:
                 changed_paths.append(path)
@@ -304,7 +296,7 @@ def status_workspace(
             adapter = _create_adapter(config, adapter_factory)
             report["treedb"]["adapter_document_count"] = adapter.count_documents()
             report["treedb"]["health"] = adapter.health()
-        except IndexingError as exc:
+        except (IndexingError, TreeDBAdapterError) as exc:
             warning = {
                 "code": "treedb_status_unavailable",
                 "message": str(exc),
@@ -383,7 +375,7 @@ def _planned_files(
         mtimes: list[float] = []
         sizes: list[int] = []
         for document in documents:
-            document_hashes.append(document.document_hash)
+            document_hashes.append(_document_state_hash(document, workspace_id))
             if document.mtime is not None:
                 mtimes.append(document.mtime)
             if document.size_bytes is not None:
@@ -399,6 +391,42 @@ def _planned_files(
             size_bytes=max(sizes) if sizes else None,
         )
     return planned
+
+
+def _planned_file_unchanged(
+    previous: FileIndexState | None,
+    planned: PlannedFile,
+) -> bool:
+    return (
+        previous is not None
+        and previous.document_hash == planned.document_hash
+        and previous.chunk_ids == planned.chunk_ids
+    )
+
+
+def _document_state_hash(document: SourceDocument, workspace_id: str) -> str:
+    digest = hashlib.sha256()
+    fields = [
+        workspace_id,
+        document.source_id,
+        document.source_type,
+        document.source_root,
+        document.path,
+        document.absolute_path,
+        document.document_hash,
+        document.document_kind,
+        str(document.start_line),
+        str(document.end_line),
+    ]
+    for field in fields:
+        digest.update(field.encode("utf-8"))
+        digest.update(b"\0")
+    for key, value in sorted(document.metadata.items()):
+        digest.update(str(key).encode("utf-8"))
+        digest.update(b"=")
+        digest.update(repr(value).encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def _combined_hash(document_hashes: list[str], chunk_ids: list[str]) -> str:

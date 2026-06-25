@@ -230,6 +230,23 @@ def test_incremental_index_skips_unchanged_chunks(tmp_path) -> None:
     assert len(adapter.upsert_batches) == 1
 
 
+def test_metadata_change_reindexes_same_content(tmp_path) -> None:
+    workspace, config = make_workspace(tmp_path)
+    adapter = RecordingAdapter()
+    factory = adapter_factory(adapter)
+    index_workspace(workspace, config, adapter_factory=factory)
+
+    config = read_config(workspace)
+    config.workspace = "renamed"
+    write_config(workspace, config)
+    report = index_workspace(workspace, read_config(workspace), adapter_factory=factory)
+
+    assert report["changed_file_count"] == 1
+    assert report["upserted_chunks"] == 1
+    assert len(adapter.upsert_batches) == 2
+    assert adapter.upsert_batches[-1][0].meta["workspace_id"] == "renamed"
+
+
 def test_changed_files_delete_old_chunk_ids_and_upsert_new_chunks(tmp_path) -> None:
     workspace, config = make_workspace(tmp_path)
     adapter = RecordingAdapter()
@@ -264,6 +281,39 @@ def test_deleted_files_call_adapter_delete_and_remove_state(tmp_path) -> None:
     assert state["sources"]["docs"]["files"] == {}
 
 
+def test_jsonl_duplicate_content_rows_get_distinct_chunk_ids(tmp_path) -> None:
+    workspace = init_workspace(tmp_path, "demo", force=False)
+    path = tmp_path / "records.jsonl"
+    path.write_text(
+        '{"body":"same","title":"one"}\n{"body":"same","title":"two"}\n',
+        encoding="utf-8",
+    )
+    config = read_config(workspace)
+    config.sources["records"] = SourceConfig(
+        id="records",
+        type="jsonl",
+        root=str(path),
+        include=["**/*.jsonl"],
+        exclude=[],
+        content_field="body",
+    )
+    write_config(workspace, config)
+    adapter = RecordingAdapter()
+
+    report = index_workspace(
+        workspace,
+        read_config(workspace),
+        adapter_factory=adapter_factory(adapter),
+    )
+
+    assert report["upserted_chunks"] == 2
+    assert len(adapter.documents) == 2
+    line_numbers = sorted(
+        document.meta["jsonl_line"] for document in adapter.documents.values()
+    )
+    assert line_numbers == [1, 2]
+
+
 def test_embedding_dimension_mismatch_fails_clearly(tmp_path) -> None:
     workspace, config = make_workspace(tmp_path)
     adapter = RecordingAdapter()
@@ -295,6 +345,30 @@ def test_status_reports_local_state_and_optional_adapter_health(tmp_path) -> Non
     assert report["changed_file_count"] == 0
     assert report["treedb"]["adapter_document_count"] == 1
     assert report["treedb"]["health"]["ok"] is True
+
+
+def test_status_check_service_reports_adapter_operation_errors(tmp_path) -> None:
+    class FailingStatusAdapter(RecordingAdapter):
+        def count_documents(self) -> int:
+            raise TreeDBAdapterError("count failed")
+
+    workspace, config = make_workspace(tmp_path)
+    adapter = RecordingAdapter()
+    factory = adapter_factory(adapter)
+    index_workspace(workspace, config, adapter_factory=factory)
+
+    report = status_workspace(
+        workspace,
+        read_config(workspace),
+        check_service=True,
+        adapter_factory=adapter_factory(FailingStatusAdapter()),
+    )
+
+    assert report["treedb"]["health"] == {"ok": False, "error": "count failed"}
+    assert any(
+        warning["code"] == "treedb_status_unavailable"
+        for warning in report["warnings"]
+    )
 
 
 def test_memory_adapter_is_self_contained_and_validates_dimensions() -> None:
