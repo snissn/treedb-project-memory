@@ -5,6 +5,7 @@ from typing import Optional
 import typer
 
 from . import __version__
+from .chunking import chunk_document
 from .config import (
     VALID_SOURCE_TYPES,
     WorkspaceError,
@@ -14,6 +15,7 @@ from .config import (
     init_workspace,
     read_config,
 )
+from .sources import scan_source
 
 app = typer.Typer(
     add_completion=False,
@@ -87,11 +89,36 @@ def add(
         "--exclude",
         help="Glob to exclude. Repeat to add multiple patterns.",
     ),
+    max_file_bytes: Optional[int] = typer.Option(
+        None,
+        "--max-file-bytes",
+        help="Largest source file to read during scanning.",
+    ),
+    follow_symlinks: bool = typer.Option(
+        False,
+        "--follow-symlinks",
+        help="Follow symlinked files and directories when scanning this source.",
+    ),
+    content_field: Optional[str] = typer.Option(
+        None,
+        "--content-field",
+        help="JSONL string field to use as chunk content.",
+    ),
 ) -> None:
     """Add a source entry to the workspace config without indexing it."""
     try:
         workspace = discover_workspace()
-        source = add_source(workspace, root, source_type, source_id, include, exclude)
+        source = add_source(
+            workspace,
+            root,
+            source_type,
+            source_id,
+            include,
+            exclude,
+            max_file_bytes=max_file_bytes,
+            follow_symlinks=follow_symlinks,
+            content_field=content_field,
+        )
     except WorkspaceError as exc:
         raise typer.BadParameter(str(exc)) from exc
     typer.echo(f"Added source {source.id} ({source.type}) -> {source.root}")
@@ -130,6 +157,52 @@ def sources(
         typer.echo(f"{source.id}\t{source.type}\t{status}\t{source.root}")
 
 
+@app.command(name="index")
+def index_command(
+    source_id: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help="Scan only one configured source ID.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Scan and chunk sources without writing TreeDB or embedding state.",
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Alias for --format json.",
+    ),
+) -> None:
+    """Scan configured sources and, for now, report dry-run chunk counts."""
+    if json_output:
+        output_format = "json"
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    if not dry_run:
+        raise typer.BadParameter(
+            "index writes are not implemented yet; use --dry-run to scan and chunk"
+        )
+
+    try:
+        workspace = discover_workspace()
+        config = read_config(workspace)
+        report = build_dry_run_report(config, source_id)
+    except WorkspaceError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if output_format == "json":
+        typer.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+    _print_dry_run_report(report)
+
+
 @app.command()
 def doctor(
     output_format: str = typer.Option(
@@ -161,6 +234,92 @@ def doctor(
             typer.echo(f"ERROR: {error['message']}", err=True)
     if exit_code:
         raise typer.Exit(exit_code)
+
+
+def build_dry_run_report(config, source_id: str | None = None) -> dict:
+    if source_id is not None and source_id not in config.sources:
+        raise WorkspaceError(f"source ID '{source_id}' is not configured")
+
+    sources = (
+        [config.sources[source_id]]
+        if source_id is not None
+        else list(config.sources.values())
+    )
+    source_reports = []
+    total_files = 0
+    total_documents = 0
+    total_chunks = 0
+    total_skipped = 0
+    all_warnings = []
+
+    for source in sources:
+        scan = scan_source(source)
+        chunks = []
+        chunk_kinds: dict[str, int] = {}
+        for document in scan.documents:
+            document_chunks = chunk_document(document, config.workspace)
+            chunks.extend(document_chunks)
+            for chunk in document_chunks:
+                kind = chunk.metadata["chunk_kind"]
+                chunk_kinds[kind] = chunk_kinds.get(kind, 0) + 1
+
+        warnings = [skip.to_json() for skip in scan.warnings()]
+        source_report = {
+            "id": source.id,
+            "type": source.type,
+            "root": source.root,
+            "files_scanned": scan.files_scanned,
+            "documents": len(scan.documents),
+            "chunks": len(chunks),
+            "skipped": len(scan.skipped),
+            "warnings": warnings,
+            "chunk_kinds": dict(sorted(chunk_kinds.items())),
+        }
+        source_reports.append(source_report)
+        total_files += scan.files_scanned
+        total_documents += len(scan.documents)
+        total_chunks += len(chunks)
+        total_skipped += len(scan.skipped)
+        all_warnings.extend(warnings)
+
+    return {
+        "dry_run": True,
+        "workspace": config.workspace,
+        "sources": source_reports,
+        "file_count": total_files,
+        "document_count": total_documents,
+        "chunk_count": total_chunks,
+        "skip_count": total_skipped,
+        "warnings": all_warnings,
+    }
+
+
+def _print_dry_run_report(report: dict) -> None:
+    typer.echo("Dry-run index summary")
+    typer.echo(f"Workspace: {report['workspace']}")
+    typer.echo(f"Sources: {len(report['sources'])}")
+    typer.echo(f"Files scanned: {report['file_count']}")
+    typer.echo(f"Documents: {report['document_count']}")
+    typer.echo(f"Chunks: {report['chunk_count']}")
+    typer.echo(f"Skipped: {report['skip_count']}")
+    typer.echo(f"Warnings: {len(report['warnings'])}")
+    for source in report["sources"]:
+        typer.echo(
+            f"{source['id']}\t{source['type']}\t"
+            f"files={source['files_scanned']}\t"
+            f"documents={source['documents']}\t"
+            f"chunks={source['chunks']}\t"
+            f"skipped={source['skipped']}\t"
+            f"warnings={len(source['warnings'])}"
+        )
+    if report["warnings"]:
+        typer.echo("Warnings:")
+        for warning in report["warnings"]:
+            line = f":{warning['line']}" if "line" in warning else ""
+            typer.echo(
+                f"- {warning['source_id']}:{warning['path']}{line} "
+                f"[{warning['code']}] {warning['message']}"
+            )
 
 
 def main() -> None:

@@ -11,11 +11,16 @@ WORKSPACE_DIR = ".treedb-project-memory"
 CONFIG_NAME = "config.yaml"
 STATE_DIR = "state"
 
-VALID_SOURCE_TYPES = {"repo", "folder", "jsonl", "file"}
+VALID_SOURCE_TYPES = {"repo", "folder", "markdown", "text", "jsonl", "file"}
+DEFAULT_MAX_FILE_BYTES = 1_048_576
+DEFAULT_FOLLOW_SYMLINKS = False
+DEFAULT_JSONL_CONTENT_FIELD = "content"
 DEFAULT_INCLUDE = {
     "repo": ["**/*.py", "**/*.js", "**/*.ts", "**/*.md", "**/*.txt"],
     "folder": ["**/*.md", "**/*.txt"],
-    "jsonl": ["*.jsonl"],
+    "markdown": ["**/*.md", "**/*.markdown"],
+    "text": ["**/*.txt", "**/*.text"],
+    "jsonl": ["**/*.jsonl"],
     "file": ["*"],
 }
 DEFAULT_EXCLUDE = {
@@ -58,14 +63,22 @@ class SourceConfig:
     root: str
     include: list[str] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
+    max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
+    follow_symlinks: bool = DEFAULT_FOLLOW_SYMLINKS
+    content_field: str | None = None
 
     def to_yaml(self) -> dict[str, Any]:
-        return {
+        payload = {
             "type": self.type,
             "root": self.root,
             "include": list(self.include),
             "exclude": list(self.exclude),
+            "max_file_bytes": self.max_file_bytes,
+            "follow_symlinks": self.follow_symlinks,
         }
+        if self.type == "jsonl":
+            payload["content_field"] = self.content_field or DEFAULT_JSONL_CONTENT_FIELD
+        return payload
 
     def to_json(self) -> dict[str, Any]:
         return {"id": self.id, **self.to_yaml(), "exists": root_exists(self.root)}
@@ -122,12 +135,25 @@ class ProjectConfig:
                 raise ValidationError(f"sources.{source_id}.root must be a string")
             include = validate_globs(raw_source.get("include", []), source_id, "include")
             exclude = validate_globs(raw_source.get("exclude", []), source_id, "exclude")
+            max_file_bytes = validate_max_file_bytes(
+                raw_source.get("max_file_bytes", DEFAULT_MAX_FILE_BYTES), source_id
+            )
+            follow_symlinks = validate_follow_symlinks(
+                raw_source.get("follow_symlinks", DEFAULT_FOLLOW_SYMLINKS), source_id
+            )
+            content_field = validate_content_field(
+                raw_source.get("content_field", DEFAULT_JSONL_CONTENT_FIELD),
+                source_id,
+            )
             sources[source_id] = SourceConfig(
                 id=source_id,
                 type=source_type,
                 root=root,
                 include=include,
                 exclude=exclude,
+                max_file_bytes=max_file_bytes,
+                follow_symlinks=follow_symlinks,
+                content_field=content_field if source_type == "jsonl" else None,
             )
 
         retrieval = data.get("retrieval", {})
@@ -210,6 +236,9 @@ def add_source(
     source_id: str | None,
     include: list[str],
     exclude: list[str],
+    max_file_bytes: int | None = None,
+    follow_symlinks: bool = DEFAULT_FOLLOW_SYMLINKS,
+    content_field: str | None = None,
 ) -> SourceConfig:
     config = read_config(workspace)
     normalized_root = normalize_root(root)
@@ -228,6 +257,19 @@ def add_source(
         root=normalized_root,
         include=include or list(DEFAULT_INCLUDE[resolved_type]),
         exclude=exclude or list(DEFAULT_EXCLUDE[resolved_type]),
+        max_file_bytes=validate_max_file_bytes(
+            max_file_bytes if max_file_bytes is not None else DEFAULT_MAX_FILE_BYTES,
+            resolved_id,
+        ),
+        follow_symlinks=validate_follow_symlinks(follow_symlinks, resolved_id),
+        content_field=(
+            validate_content_field(
+                content_field or DEFAULT_JSONL_CONTENT_FIELD,
+                resolved_id,
+            )
+            if resolved_type == "jsonl"
+            else None
+        ),
     )
     validate_globs(source.include, source.id, "include")
     validate_globs(source.exclude, source.id, "exclude")
@@ -272,10 +314,34 @@ def validate_globs(value: Any, source_id: str, field_name: str) -> list[str]:
     return list(value)
 
 
+def validate_max_file_bytes(value: Any, source_id: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValidationError(
+            f"sources.{source_id}.max_file_bytes must be a positive integer"
+        )
+    return value
+
+
+def validate_follow_symlinks(value: Any, source_id: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValidationError(f"sources.{source_id}.follow_symlinks must be a boolean")
+    return value
+
+
+def validate_content_field(value: Any, source_id: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"sources.{source_id}.content_field must be a string")
+    return value
+
+
 def infer_source_type(root: str) -> str:
     path = Path(root)
     if path.suffix == ".jsonl":
         return "jsonl"
+    if path.suffix in {".md", ".markdown"}:
+        return "markdown"
+    if path.suffix in {".txt", ".text"}:
+        return "text"
     if (path / ".git").exists():
         return "repo"
     if path.exists() and path.is_file():
