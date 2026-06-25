@@ -20,6 +20,9 @@ dependencies = [
 dev = [
   "pytest>=8,<9"
 ]
+local-embeddings = [
+  "sentence-transformers>=3,<4"
+]
 
 [project.scripts]
 treedb-project-memory = "treedb_project_memory.cli:main"
