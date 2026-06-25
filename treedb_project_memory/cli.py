@@ -19,6 +19,7 @@ from .config import (
 from .indexing import IndexingError, index_workspace, status_workspace
 from .retrieval import RetrievalError, search_workspace
 from .sources import scan_source
+from .ui import UIServerError, UISettings, serve_ui
 
 app = typer.Typer(
     add_completion=False,
@@ -433,6 +434,44 @@ def doctor(
             typer.echo(f"WARNING: {warning['message']}", err=True)
     if exit_code:
         raise typer.Exit(exit_code)
+
+
+@app.command()
+def ui(
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Local interface to bind.",
+    ),
+    port: int = typer.Option(
+        8765,
+        "--port",
+        min=0,
+        help="Local port to bind. Use 0 to choose an available port.",
+    ),
+    open_browser: bool = typer.Option(
+        False,
+        "--open/--no-open",
+        help="Open the console in the default browser after startup.",
+    ),
+    check_service: bool = typer.Option(
+        False,
+        "--check-service",
+        help="Include TreeDB service health in status refreshes.",
+    ),
+) -> None:
+    """Start the local memory console web UI."""
+    try:
+        serve_ui(
+            UISettings(
+                host=host,
+                port=port,
+                open_browser=open_browser,
+                check_service=check_service,
+            )
+        )
+    except UIServerError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def build_dry_run_report(config, source_id: str | None = None) -> dict:
