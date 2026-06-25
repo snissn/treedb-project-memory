@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from treedb_project_memory.benchmarks import (
@@ -26,6 +27,17 @@ def test_generated_fixture_manifest_validates_dataset(tmp_path) -> None:
     assert validated["file_count"] == 4
     assert Path(tmp_path / "docs" / "topic-0000.md").is_file()
     assert Path(tmp_path / "records" / "notes.jsonl").is_file()
+
+
+def test_fixture_generation_refuses_to_delete_unowned_existing_dirs(tmp_path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "important.md").write_text("do not delete\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="refusing to replace"):
+        generate_fixture_dataset(tmp_path, FixtureShape(file_count=1))
+
+    assert (docs / "important.md").read_text(encoding="utf-8") == "do not delete\n"
 
 
 def test_benchmark_fixture_cli_outputs_json_and_manifest(tmp_path) -> None:

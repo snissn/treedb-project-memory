@@ -57,6 +57,7 @@ def generate_fixture_dataset(root: Path, shape: FixtureShape) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     docs = root / "docs"
     records = root / "records"
+    _ensure_owned_fixture_directory(root, [docs, records])
     shutil.rmtree(docs, ignore_errors=True)
     shutil.rmtree(records, ignore_errors=True)
     docs.mkdir(parents=True, exist_ok=True)
@@ -443,6 +444,23 @@ def _fixture_manifest(root: Path, files: list[Path], shape: FixtureShape) -> dic
         "total_bytes": total_bytes,
         "files": entries,
     }
+
+
+def _ensure_owned_fixture_directory(root: Path, generated_paths: list[Path]) -> None:
+    if not any(path.exists() for path in generated_paths):
+        return
+    manifest_path = root / FIXTURE_MANIFEST
+    if not manifest_path.exists():
+        raise ValueError(
+            f"refusing to replace existing fixture subdirectories under {root}; "
+            f"remove them manually or use a directory with {FIXTURE_MANIFEST}"
+        )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"fixture manifest is invalid: {manifest_path}") from exc
+    if manifest.get("schema") != "treedb-project-memory-fixture-v1":
+        raise ValueError(f"fixture manifest has unsupported schema: {manifest_path}")
 
 
 def _dataset_summary(manifest: dict[str, Any]) -> dict[str, Any]:
