@@ -181,6 +181,9 @@ def test_ask_missing_generator_returns_clear_error() -> None:
 def test_citation_rendering_uses_text_content_not_html_injection() -> None:
     assert ".textContent =" in APP_JS
     assert ".innerHTML" not in APP_JS
+    assert 'document.createElement("a")' in APP_JS
+    assert "new URLSearchParams()" in APP_JS
+    assert "#citation?" in APP_JS
 
 
 def test_trace_response_renders_trace_contract() -> None:

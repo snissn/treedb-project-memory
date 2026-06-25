@@ -651,6 +651,11 @@ textarea {
   padding: 3px 7px;
   color: var(--accent);
   font-size: 12px;
+  text-decoration: none;
+}
+
+.citation:hover {
+  border-color: var(--accent);
 }
 
 .trace {
@@ -711,6 +716,26 @@ function appendText(parent, tag, text, className) {
   node.textContent = text == null ? "" : String(text);
   parent.appendChild(node);
   return node;
+}
+
+function appendCitationLink(parent, citation) {
+  const link = document.createElement("a");
+  link.className = "citation";
+  link.href = citationHref(citation);
+  link.textContent = citation.label || citation.path || citation.chunk_id || "citation";
+  link.setAttribute("aria-label", `Citation ${link.textContent}`);
+  parent.appendChild(link);
+  return link;
+}
+
+function citationHref(citation) {
+  const params = new URLSearchParams();
+  if (citation.source_id) params.set("source", citation.source_id);
+  if (citation.path) params.set("path", citation.path);
+  if (citation.start_line != null) params.set("line", String(citation.start_line));
+  if (citation.end_line != null) params.set("end", String(citation.end_line));
+  if (citation.chunk_id) params.set("chunk", citation.chunk_id);
+  return `#citation?${params.toString()}`;
 }
 
 async function requestJson(url, options = {}) {
@@ -879,7 +904,7 @@ function renderResults(results) {
     const citations = document.createElement("div");
     citations.className = "citation-row";
     if (result.citation && result.citation.label) {
-      appendText(citations, "span", result.citation.label, "citation");
+      appendCitationLink(citations, result.citation);
     }
     row.appendChild(citations);
     target.appendChild(row);
