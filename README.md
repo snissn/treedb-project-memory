@@ -24,6 +24,8 @@ Implemented now:
 - cited search, optional extractive ask, and retrieval traces;
 - dependency-free local UI console with status, diagnostics, search, ask,
   citations, and trace views.
+- repeatable benchmark harnesses for fixture generation, ingest, retrieval, and
+  UI smoke checks.
 
 Not implemented yet:
 
@@ -108,6 +110,7 @@ treedb-project-memory ask "What does the guide say?" --mode keyword --explain
 - [Metadata schema](docs/metadata-schema.md)
 - [Local TreeDB service](docs/local-service.md)
 - [Local UI](docs/ui.md)
+- [Benchmarks and scale evidence](docs/benchmarks.md)
 - [Development setup](docs/development.md)
 - [Packaging](docs/packaging.md)
 - [Limitations](docs/limitations.md)
@@ -125,6 +128,14 @@ python scripts/check_markdown_links.py
 The smoke script exercises a clean temporary workspace with generic sample
 content. It validates init/add/doctor/dry-run/index/status behavior without
 requiring private repositories or optional TreeDB services.
+
+For local performance smoke:
+
+```sh
+treedb-project-memory benchmark ingest --output-dir /tmp/tpm-ingest-bench --files 4 --paragraphs 2 --jsonl-rows 2
+treedb-project-memory benchmark retrieval --output-dir /tmp/tpm-retrieval-bench --files 4 --paragraphs 2 --jsonl-rows 2 --repetitions 3
+treedb-project-memory benchmark ui-smoke --output-dir /tmp/tpm-ui-smoke
+```
 
 ## Repo Contract
 
