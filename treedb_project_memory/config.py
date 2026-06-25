@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
+import os
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,9 +16,30 @@ CONFIG_NAME = "config.yaml"
 STATE_DIR = "state"
 
 VALID_SOURCE_TYPES = {"repo", "folder", "markdown", "text", "jsonl", "file"}
+VALID_EMBEDDING_PROVIDERS = {
+    "deterministic",
+    "openai-compatible",
+    "sentence-transformers",
+}
+VALID_TREEDB_SIMILARITIES = {"cosine", "l2", "inner_product"}
+VALID_TREEDB_SERVICE_LIFECYCLES = {"external"}
+VALID_TREEDB_ADAPTERS = {"haystack", "memory"}
+
 DEFAULT_MAX_FILE_BYTES = 1_048_576
 DEFAULT_FOLLOW_SYMLINKS = False
 DEFAULT_JSONL_CONTENT_FIELD = "content"
+DEFAULT_EMBEDDING_PROVIDER = "deterministic"
+DEFAULT_EMBEDDING_MODEL = "deterministic-v1"
+DEFAULT_EMBEDDING_DIMENSION = 32
+DEFAULT_EMBEDDING_BATCH_SIZE = 32
+DEFAULT_EMBEDDING_TIMEOUT_SECONDS = 60.0
+DEFAULT_TREEDB_ADAPTER = "haystack"
+DEFAULT_TREEDB_BASE_URL = "http://127.0.0.1:7120"
+DEFAULT_TREEDB_INDEX = "project_memory"
+DEFAULT_TREEDB_SIMILARITY = "cosine"
+DEFAULT_TREEDB_TIMEOUT_SECONDS = 30.0
+DEFAULT_TREEDB_SERVICE_LIFECYCLE = "external"
+
 DEFAULT_INCLUDE = {
     "repo": ["**/*.py", "**/*.js", "**/*.ts", "**/*.md", "**/*.txt"],
     "folder": ["**/*.md", "**/*.txt"],
@@ -26,6 +51,8 @@ DEFAULT_INCLUDE = {
 DEFAULT_EXCLUDE = {
     "repo": [".git/**", "node_modules/**", "dist/**", ".venv/**"],
     "folder": [],
+    "markdown": [],
+    "text": [],
     "jsonl": [],
     "file": [],
 }
@@ -85,18 +112,78 @@ class SourceConfig:
 
 
 @dataclass
+class EmbeddingConfig:
+    provider: str = DEFAULT_EMBEDDING_PROVIDER
+    model: str = DEFAULT_EMBEDDING_MODEL
+    dimension: int = DEFAULT_EMBEDDING_DIMENSION
+    batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
+    base_url: str | None = None
+    api_key_env: str | None = None
+    timeout_seconds: float | None = None
+    device: str | None = None
+
+    def to_yaml(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "provider": self.provider,
+            "model": self.model,
+            "dimension": self.dimension,
+            "batch_size": self.batch_size,
+        }
+        if self.provider == "openai-compatible":
+            payload["base_url"] = self.base_url or "https://api.openai.com/v1"
+            payload["api_key_env"] = self.api_key_env or "OPENAI_API_KEY"
+            payload["timeout_seconds"] = (
+                self.timeout_seconds or DEFAULT_EMBEDDING_TIMEOUT_SECONDS
+            )
+        if self.provider == "sentence-transformers" and self.device:
+            payload["device"] = self.device
+        return payload
+
+    def to_json(self) -> dict[str, Any]:
+        return self.to_yaml()
+
+    def signature(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "dimension": self.dimension,
+        }
+
+
+@dataclass
+class TreeDBConfig:
+    adapter: str = DEFAULT_TREEDB_ADAPTER
+    base_url: str = DEFAULT_TREEDB_BASE_URL
+    index: str = DEFAULT_TREEDB_INDEX
+    similarity: str = DEFAULT_TREEDB_SIMILARITY
+    service_lifecycle: str = DEFAULT_TREEDB_SERVICE_LIFECYCLE
+    timeout_seconds: float = DEFAULT_TREEDB_TIMEOUT_SECONDS
+    ensure_index: bool = True
+
+    def to_yaml(self) -> dict[str, Any]:
+        return {
+            "adapter": self.adapter,
+            "base_url": self.base_url,
+            "index": self.index,
+            "similarity": self.similarity,
+            "service_lifecycle": self.service_lifecycle,
+            "timeout_seconds": self.timeout_seconds,
+            "ensure_index": self.ensure_index,
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        return self.to_yaml()
+
+
+@dataclass
 class ProjectConfig:
     workspace: str
     sources: dict[str, SourceConfig] = field(default_factory=dict)
     retrieval: dict[str, Any] = field(
         default_factory=lambda: {"default_mode": "hybrid", "top_k": 8}
     )
-    embedding: dict[str, Any] = field(
-        default_factory=lambda: {
-            "provider": "sentence-transformers",
-            "model": "all-MiniLM-L6-v2",
-        }
-    )
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    treedb: TreeDBConfig = field(default_factory=TreeDBConfig)
 
     @classmethod
     def default(cls, workspace: str) -> "ProjectConfig":
@@ -157,21 +244,17 @@ class ProjectConfig:
             )
 
         retrieval = data.get("retrieval", {})
-        embedding = data.get("embedding", {})
         if retrieval is None:
             retrieval = {}
-        if embedding is None:
-            embedding = {}
         if not isinstance(retrieval, dict):
             raise ValidationError("retrieval must be a mapping")
-        if not isinstance(embedding, dict):
-            raise ValidationError("embedding must be a mapping")
 
         return cls(
             workspace=workspace,
             sources=sources,
             retrieval=dict(retrieval),
-            embedding=dict(embedding),
+            embedding=validate_embedding_config(data.get("embedding")),
+            treedb=validate_treedb_config(data.get("treedb")),
         )
 
     def to_yaml(self) -> dict[str, Any]:
@@ -182,7 +265,8 @@ class ProjectConfig:
                 for source_id, source in sorted(self.sources.items())
             },
             "retrieval": dict(self.retrieval),
-            "embedding": dict(self.embedding),
+            "embedding": self.embedding.to_yaml(),
+            "treedb": self.treedb.to_yaml(),
         }
 
 
@@ -334,6 +418,178 @@ def validate_content_field(value: Any, source_id: str) -> str:
     return value
 
 
+def validate_embedding_config(value: Any) -> EmbeddingConfig:
+    if value is None:
+        return EmbeddingConfig()
+    if not isinstance(value, dict):
+        raise ValidationError("embedding must be a mapping")
+    provider = value.get("provider")
+    if provider not in VALID_EMBEDDING_PROVIDERS:
+        valid = ", ".join(sorted(VALID_EMBEDDING_PROVIDERS))
+        raise ValidationError(f"embedding.provider must be one of: {valid}")
+    model = value.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise ValidationError("embedding.model must be a non-empty string")
+    dimension = validate_positive_int(value.get("dimension"), "embedding.dimension")
+    batch_size = validate_positive_int(
+        value.get("batch_size", DEFAULT_EMBEDDING_BATCH_SIZE),
+        "embedding.batch_size",
+    )
+    base_url = value.get("base_url")
+    api_key_env = value.get("api_key_env")
+    timeout_seconds = value.get("timeout_seconds")
+    device = value.get("device")
+
+    allowed = {"provider", "model", "dimension", "batch_size"}
+    if provider == "openai-compatible":
+        allowed.update({"base_url", "api_key_env", "timeout_seconds"})
+        if base_url is None:
+            base_url = "https://api.openai.com/v1"
+        if api_key_env is None:
+            api_key_env = "OPENAI_API_KEY"
+        if timeout_seconds is None:
+            timeout_seconds = DEFAULT_EMBEDDING_TIMEOUT_SECONDS
+        base_url = validate_url_string(base_url, "embedding.base_url")
+        api_key_env = validate_non_empty_string(api_key_env, "embedding.api_key_env")
+        timeout_seconds = validate_positive_number(
+            timeout_seconds,
+            "embedding.timeout_seconds",
+        )
+    elif provider == "sentence-transformers":
+        allowed.add("device")
+        if device is not None:
+            device = validate_non_empty_string(device, "embedding.device")
+    elif base_url is not None or api_key_env is not None or timeout_seconds is not None:
+        raise ValidationError(
+            "embedding.base_url, embedding.api_key_env, and embedding.timeout_seconds "
+            "are only valid for provider openai-compatible"
+        )
+
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValidationError(f"embedding has unsupported field(s): {', '.join(unknown)}")
+
+    return EmbeddingConfig(
+        provider=provider,
+        model=model,
+        dimension=dimension,
+        batch_size=batch_size,
+        base_url=base_url,
+        api_key_env=api_key_env,
+        timeout_seconds=timeout_seconds,
+        device=device,
+    )
+
+
+def validate_treedb_config(value: Any) -> TreeDBConfig:
+    if value is None:
+        return TreeDBConfig()
+    if not isinstance(value, dict):
+        raise ValidationError("treedb must be a mapping")
+    allowed = {
+        "adapter",
+        "base_url",
+        "index",
+        "similarity",
+        "service_lifecycle",
+        "timeout_seconds",
+        "ensure_index",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValidationError(f"treedb has unsupported field(s): {', '.join(unknown)}")
+
+    adapter = value.get("adapter", DEFAULT_TREEDB_ADAPTER)
+    if adapter not in VALID_TREEDB_ADAPTERS:
+        valid = ", ".join(sorted(VALID_TREEDB_ADAPTERS))
+        raise ValidationError(f"treedb.adapter must be one of: {valid}")
+    base_url = validate_url_string(
+        value.get("base_url", DEFAULT_TREEDB_BASE_URL),
+        "treedb.base_url",
+    )
+    index = validate_treedb_index(value.get("index", DEFAULT_TREEDB_INDEX))
+    similarity = validate_similarity(
+        value.get("similarity", DEFAULT_TREEDB_SIMILARITY)
+    )
+    service_lifecycle = value.get(
+        "service_lifecycle",
+        DEFAULT_TREEDB_SERVICE_LIFECYCLE,
+    )
+    if service_lifecycle not in VALID_TREEDB_SERVICE_LIFECYCLES:
+        valid = ", ".join(sorted(VALID_TREEDB_SERVICE_LIFECYCLES))
+        raise ValidationError(f"treedb.service_lifecycle must be one of: {valid}")
+    timeout_seconds = validate_positive_number(
+        value.get("timeout_seconds", DEFAULT_TREEDB_TIMEOUT_SECONDS),
+        "treedb.timeout_seconds",
+    )
+    ensure_index = value.get("ensure_index", True)
+    if not isinstance(ensure_index, bool):
+        raise ValidationError("treedb.ensure_index must be a boolean")
+
+    return TreeDBConfig(
+        adapter=adapter,
+        base_url=base_url,
+        index=index,
+        similarity=similarity,
+        service_lifecycle=service_lifecycle,
+        timeout_seconds=timeout_seconds,
+        ensure_index=ensure_index,
+    )
+
+
+def validate_positive_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValidationError(f"{field_name} must be a positive integer")
+    return value
+
+
+def validate_positive_number(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValidationError(f"{field_name} must be a positive number")
+    return float(value)
+
+
+def validate_non_empty_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def validate_url_string(value: Any, field_name: str) -> str:
+    url = validate_non_empty_string(value, field_name)
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValidationError(f"{field_name} must start with http:// or https://")
+    return url.rstrip("/")
+
+
+def validate_treedb_index(value: Any) -> str:
+    index = validate_non_empty_string(value, "treedb.index")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", index):
+        raise ValidationError(
+            "treedb.index must start with a letter or digit and contain only letters, digits, dots, underscores, or dashes"
+        )
+    return index
+
+
+def validate_similarity(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValidationError("treedb.similarity must be a string")
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "cosine": "cosine",
+        "l2": "l2",
+        "euclidean": "l2",
+        "inner_product": "inner_product",
+        "innerproduct": "inner_product",
+        "dot_product": "inner_product",
+        "dotproduct": "inner_product",
+    }
+    if normalized not in aliases:
+        valid = ", ".join(sorted(VALID_TREEDB_SIMILARITIES))
+        raise ValidationError(f"treedb.similarity must be one of: {valid}")
+    return aliases[normalized]
+
+
 def infer_source_type(root: str) -> str:
     path = Path(root)
     if path.suffix == ".jsonl":
@@ -363,12 +619,26 @@ def doctor_report(workspace: Workspace) -> tuple[dict[str, Any], int]:
                 "workspace_root": str(workspace.root),
                 "config_path": str(workspace.config_path),
                 "errors": [{"code": "invalid_config", "message": str(exc)}],
+                "warnings": [],
+                "sources": [],
+            },
+            1,
+        )
+    except WorkspaceError as exc:
+        return (
+            {
+                "ok": False,
+                "workspace_root": str(workspace.root),
+                "config_path": str(workspace.config_path),
+                "errors": [{"code": "workspace_error", "message": str(exc)}],
+                "warnings": [],
                 "sources": [],
             },
             1,
         )
 
     errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
     sources = []
     for source in config.sources.values():
         exists = root_exists(source.root)
@@ -382,13 +652,132 @@ def doctor_report(workspace: Workspace) -> tuple[dict[str, Any], int]:
             )
         sources.append({**source.to_json(), "exists": exists})
 
+    embedding = _embedding_doctor(config.embedding)
+    treedb = _treedb_doctor(config.treedb)
+    warnings.extend(embedding["warnings"])
+    warnings.extend(treedb["warnings"])
+
     report = {
         "ok": not errors,
         "workspace": config.workspace,
         "workspace_root": str(workspace.root),
         "config_path": str(workspace.config_path),
         "state_dir": str(workspace.state_dir),
+        "embedding": embedding,
+        "treedb": treedb,
         "sources": sources,
         "errors": errors,
+        "warnings": warnings,
     }
     return report, 0 if report["ok"] else 1
+
+
+def _embedding_doctor(config: EmbeddingConfig) -> dict[str, Any]:
+    warnings: list[dict[str, str]] = []
+    status = "available"
+    if config.provider == "sentence-transformers":
+        if importlib.util.find_spec("sentence_transformers") is None:
+            status = "missing_dependency"
+            warnings.append(
+                {
+                    "code": "missing_embedding_dependency",
+                    "message": (
+                        "embedding provider 'sentence-transformers' requires the "
+                        "optional sentence-transformers package; install "
+                        "'treedb-project-memory[local-embeddings]' or configure "
+                        "embedding.provider: deterministic for tests"
+                    ),
+                }
+            )
+    elif config.provider == "openai-compatible":
+        api_key_env = config.api_key_env or "OPENAI_API_KEY"
+        if not os.environ.get(api_key_env):
+            status = "missing_api_key"
+            warnings.append(
+                {
+                    "code": "missing_embedding_api_key",
+                    "message": (
+                        f"embedding provider 'openai-compatible' requires ${api_key_env} "
+                        "to be set before indexing"
+                    ),
+                }
+            )
+    return {
+        "provider": config.provider,
+        "model": config.model,
+        "dimension": config.dimension,
+        "batch_size": config.batch_size,
+        "status": status,
+        "warnings": warnings,
+    }
+
+
+def _treedb_doctor(config: TreeDBConfig) -> dict[str, Any]:
+    warnings: list[dict[str, str]] = []
+    if config.adapter == "memory":
+        return {
+            **config.to_json(),
+            "dependencies": {},
+            "health": {
+                "ok": True,
+                "adapter": "memory",
+                "message": "self-contained in-memory adapter selected",
+            },
+            "warnings": warnings,
+        }
+
+    dependency_status: dict[str, bool] = {
+        "haystack": _module_available("haystack"),
+        "treedb_client": _module_available("treedb_client"),
+        "treedb_haystack": _module_available(
+            "haystack_integrations.document_stores.treedb"
+        ),
+    }
+    missing = [name for name, present in dependency_status.items() if not present]
+    if missing:
+        warnings.append(
+            {
+                "code": "missing_treedb_dependency",
+                "message": (
+                    "TreeDB/Haystack indexing requires optional packages not found: "
+                    + ", ".join(missing)
+                    + ". Install upstream treedb-client and treedb-haystack without "
+                    "adding private paths to this package."
+                ),
+            }
+        )
+
+    health: dict[str, Any] = {"ok": False}
+    try:
+        request = urllib.request.Request(
+            f"{config.base_url}/v1/health",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(
+            request,
+            timeout=min(config.timeout_seconds, 1.0),
+        ) as response:
+            health = {"ok": 200 <= response.status < 300, "status_code": response.status}
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        warnings.append(
+            {
+                "code": "treedb_service_unreachable",
+                "message": (
+                    f"TreeDB document service was not reachable at {config.base_url}: {exc}"
+                ),
+            }
+        )
+
+    return {
+        **config.to_json(),
+        "dependencies": dependency_status,
+        "health": health,
+        "warnings": warnings,
+    }
+
+
+def _module_available(module_name: str) -> bool:
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, AttributeError, ValueError):
+        return False

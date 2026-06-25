@@ -4,11 +4,11 @@
 source material: repositories, folders, docs, notes, exports, and other local
 knowledge sources.
 
-The intended product is described in [spec.md](spec.md). This repository is
-currently at the source-scanning dry-run stage: it provides package metadata, a
-minimal importable Python package, workspace-local YAML config commands, source
-scanning, chunking, dry-run index counts, tests, and CI scaffolding for future
-implementation work.
+The intended product is described in [spec.md](spec.md). This repository now
+contains the bounded indexing MVP: workspace-local YAML config commands, source
+scanning, chunking, deterministic test embeddings, optional embedding providers,
+a TreeDB/Haystack adapter boundary, a self-contained memory adapter for smoke
+tests, incremental local index state, and status/doctor diagnostics.
 
 ## Status
 
@@ -29,14 +29,25 @@ Implemented now:
   sources.
 - `index --dry-run` counts scanned files, source documents, chunks, skipped
   entries, and warnings without writing TreeDB or embedding state.
+- Non-dry-run `index` embeds changed chunks, upserts them through the configured
+  adapter, deletes stale chunk IDs, and writes
+  `.treedb-project-memory/state/index-state.json`.
+- `status` reports local index state and optionally checks the configured
+  adapter.
+- Deterministic embeddings for self-contained CI and smoke tests.
+- Optional local `sentence-transformers` embeddings through a dynamic import.
+- Optional OpenAI-compatible remote embeddings through direct HTTP calls.
+- Optional real TreeDB/Haystack indexing through dynamic imports of upstream
+  Haystack and TreeDB packages.
+- Explicit `treedb.adapter: memory` for self-contained non-persistent smoke
+  runs.
 - Smoke tests and config CLI behavior tests.
 - GitHub Actions test workflow.
 
 Not implemented yet:
 
-- Non-dry-run indexing.
-- TreeDB or Haystack integration.
-- Search, ask, citations, UI, or diagnostics.
+- Search, ask, retrieval-time citations, UI, or advanced diagnostics.
+- Retrieval/search emulation, ANN claims, or high-QPS performance claims.
 
 ## Development Setup
 
@@ -73,12 +84,19 @@ The current CLI guarantees:
   untouched.
 - `treedb-project-memory index --dry-run --json` emits the same dry-run summary
   as parseable JSON.
-- `treedb-project-memory doctor --format json` emits parseable config and root
-  diagnostics.
+- `treedb-project-memory index` embeds changed chunks and upserts them through
+  the configured adapter. Unchanged files are skipped from persisted chunk
+  hashes. Deleted files produce adapter delete calls for stale chunk IDs.
+- `treedb-project-memory status --format json` emits parseable local source and
+  index state.
+- `treedb-project-memory status --check-service` also instantiates the selected
+  adapter and reports health/count when available.
+- `treedb-project-memory doctor --format json` emits parseable config, root,
+  optional dependency, and configured service diagnostics.
 
-Future issues will add TreeDB indexing, retrieval, and richer diagnostics. Until
-those issues land, documentation and PRs should not claim those workflows are
-implemented.
+Future issues will add retrieval, search, answer generation, and richer
+inspection commands. Until those issues land, documentation and PRs should not
+claim those workflows are implemented.
 
 Example config:
 
@@ -107,8 +125,18 @@ retrieval:
   default_mode: hybrid
   top_k: 8
 embedding:
-  provider: sentence-transformers
-  model: all-MiniLM-L6-v2
+  provider: deterministic
+  model: deterministic-v1
+  dimension: 32
+  batch_size: 32
+treedb:
+  adapter: haystack
+  base_url: http://127.0.0.1:7120
+  index: project_memory
+  similarity: cosine
+  service_lifecycle: external
+  timeout_seconds: 30.0
+  ensure_index: true
 ```
 
 Source entries are keyed by stable user-visible IDs. `add --id <id>` preserves an
@@ -135,6 +163,31 @@ titles for heading or JSONL metadata when available. Dry-run metadata is
 deterministic and does not include an `indexed_at` timestamp because no index
 write occurs.
 
+## Indexing Adapters
+
+The default `treedb.adapter: haystack` path is the real TreeDB/Haystack boundary.
+It imports optional upstream packages only when selected:
+
+- `haystack.Document`
+- `haystack.document_stores.types.DuplicatePolicy`
+- `haystack_integrations.document_stores.treedb.TreeDBDocumentStore`
+
+Those packages are not mandatory dependencies of this project. If they are
+missing, `doctor` reports warnings and non-dry-run indexing fails clearly instead
+of silently falling back.
+
+For self-contained local smoke tests, set:
+
+```yaml
+treedb:
+  adapter: memory
+```
+
+The memory adapter validates document dimensions and exercises the same
+upsert/delete boundary, but it does not persist documents across CLI processes.
+The local index state file is still written, so `status` can report source/index
+freshness after the smoke run.
+
 Example dry run:
 
 ```sh
@@ -156,9 +209,10 @@ Warnings:
 - issues:issues.jsonl:3 [malformed_jsonl] malformed JSONL record skipped at line 3: ...
 ```
 
-`doctor` currently validates only the workspace config shape and source root
-existence. It does not start TreeDB, load Haystack, embed text, or inspect index
-state.
+`doctor` validates workspace config shape, source root existence, optional
+embedding dependencies for the selected provider, optional TreeDB/Haystack
+dependencies for the selected adapter, and external TreeDB service reachability
+for the real adapter. It does not embed text or mutate index state.
 
 ## Repo Contract
 

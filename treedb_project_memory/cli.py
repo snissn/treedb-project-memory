@@ -15,13 +15,14 @@ from .config import (
     init_workspace,
     read_config,
 )
+from .indexing import IndexingError, index_workspace, status_workspace
 from .sources import scan_source
 
 app = typer.Typer(
     add_completion=False,
     help=(
-        "Local project-memory workspace tooling. Indexing, retrieval, and "
-        "TreeDB/Haystack integration are planned but not implemented yet."
+        "Local project-memory workspace tooling with source scanning and "
+        "TreeDB/Haystack indexing."
     ),
 )
 
@@ -169,6 +170,11 @@ def index_command(
         "--dry-run",
         help="Scan and chunk sources without writing TreeDB or embedding state.",
     ),
+    rebuild: bool = typer.Option(
+        False,
+        "--rebuild",
+        help="Delete prior chunk IDs for selected sources and rebuild local index state.",
+    ),
     output_format: str = typer.Option(
         "text",
         "--format",
@@ -180,27 +186,80 @@ def index_command(
         help="Alias for --format json.",
     ),
 ) -> None:
-    """Scan configured sources and, for now, report dry-run chunk counts."""
+    """Scan configured sources and index changed chunks into TreeDB."""
     if json_output:
         output_format = "json"
     if output_format not in {"text", "json"}:
         raise typer.BadParameter("--format must be 'text' or 'json'")
-    if not dry_run:
-        raise typer.BadParameter(
-            "index writes are not implemented yet; use --dry-run to scan and chunk"
-        )
 
     try:
         workspace = discover_workspace()
         config = read_config(workspace)
-        report = build_dry_run_report(config, source_id)
-    except WorkspaceError as exc:
+        if dry_run:
+            report = build_dry_run_report(config, source_id)
+        else:
+            report = index_workspace(
+                workspace,
+                config,
+                source_id=source_id,
+                rebuild=rebuild,
+            )
+    except (WorkspaceError, IndexingError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     if output_format == "json":
         typer.echo(json.dumps(report, indent=2, sort_keys=True))
         return
-    _print_dry_run_report(report)
+    if dry_run:
+        _print_dry_run_report(report)
+    else:
+        _print_index_report(report)
+
+
+@app.command()
+def status(
+    source_id: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help="Report only one configured source ID.",
+    ),
+    check_service: bool = typer.Option(
+        False,
+        "--check-service",
+        help="Also instantiate the TreeDB adapter and report service health/count.",
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Alias for --format json.",
+    ),
+) -> None:
+    """Report local source and index state."""
+    if json_output:
+        output_format = "json"
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    try:
+        workspace = discover_workspace()
+        config = read_config(workspace)
+        report = status_workspace(
+            workspace,
+            config,
+            source_id=source_id,
+            check_service=check_service,
+        )
+    except (WorkspaceError, IndexingError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if output_format == "json":
+        typer.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+    _print_status_report(report)
 
 
 @app.command()
@@ -211,7 +270,7 @@ def doctor(
         help="Output format: text or json.",
     ),
 ) -> None:
-    """Validate workspace config and source root existence."""
+    """Validate workspace config, optional dependencies, and source roots."""
     if output_format not in {"text", "json"}:
         raise typer.BadParameter("--format must be 'text' or 'json'")
     try:
@@ -229,9 +288,13 @@ def doctor(
         typer.echo(json.dumps(report, indent=2, sort_keys=True))
     elif report["ok"]:
         typer.echo("Workspace config OK.")
+        for warning in report.get("warnings", []):
+            typer.echo(f"WARNING: {warning['message']}", err=True)
     else:
         for error in report["errors"]:
             typer.echo(f"ERROR: {error['message']}", err=True)
+        for warning in report.get("warnings", []):
+            typer.echo(f"WARNING: {warning['message']}", err=True)
     if exit_code:
         raise typer.Exit(exit_code)
 
@@ -320,6 +383,77 @@ def _print_dry_run_report(report: dict) -> None:
                 f"- {warning['source_id']}:{warning['path']}{line} "
                 f"[{warning['code']}] {warning['message']}"
             )
+
+
+def _print_index_report(report: dict) -> None:
+    typer.echo("Index summary")
+    typer.echo(f"Workspace: {report['workspace']}")
+    typer.echo(f"Sources: {report['source_count']}")
+    typer.echo(f"Files scanned: {report['file_count']}")
+    typer.echo(f"Documents: {report['document_count']}")
+    typer.echo(f"Chunks: {report['chunk_count']}")
+    typer.echo(f"Changed files: {report['changed_file_count']}")
+    typer.echo(f"Unchanged files: {report['unchanged_file_count']}")
+    typer.echo(f"Deleted files: {report['deleted_file_count']}")
+    typer.echo(f"Upserted chunks: {report['upserted_chunks']}")
+    typer.echo(f"Deleted chunks: {report['deleted_chunks']}")
+    typer.echo(f"TreeDB documents: {report['adapter_document_count']}")
+    typer.echo(f"State: {report['state_path']}")
+    for source in report["sources"]:
+        typer.echo(
+            f"{source['id']}\t{source['type']}\t"
+            f"files={source['files_scanned']}\t"
+            f"chunks={source['chunks']}\t"
+            f"changed={source['changed_files']}\t"
+            f"unchanged={source['unchanged_files']}\t"
+            f"deleted={source['deleted_files']}\t"
+            f"warnings={len(source['warnings'])}"
+        )
+    _print_warning_list(report.get("warnings", []))
+
+
+def _print_status_report(report: dict) -> None:
+    typer.echo("Index status")
+    typer.echo(f"Workspace: {report['workspace']}")
+    typer.echo(f"State: {report['state_path']}")
+    typer.echo(f"State exists: {report['state_exists']}")
+    typer.echo(f"Indexed files: {report['indexed_file_count']}")
+    typer.echo(f"Indexed chunks: {report['indexed_chunk_count']}")
+    typer.echo(f"Current files: {report['current_file_count']}")
+    typer.echo(f"Current chunks: {report['current_chunk_count']}")
+    typer.echo(f"Changed files: {report['changed_file_count']}")
+    typer.echo(f"Deleted files: {report['deleted_file_count']}")
+    treedb = report["treedb"]
+    typer.echo(f"TreeDB adapter: {treedb['adapter']}")
+    typer.echo(f"TreeDB index: {treedb['index']}")
+    if "adapter_document_count" in treedb:
+        typer.echo(f"TreeDB documents: {treedb['adapter_document_count']}")
+    for source in report["sources"]:
+        typer.echo(
+            f"{source['id']}\t{source['type']}\t"
+            f"indexed_files={source['indexed_files']}\t"
+            f"indexed_chunks={source['indexed_chunks']}\t"
+            f"current_files={source['current_files']}\t"
+            f"changed={source['changed_files']}\t"
+            f"deleted={source['deleted_files']}\t"
+            f"warnings={len(source['warnings'])}"
+        )
+    _print_warning_list(report.get("warnings", []))
+
+
+def _print_warning_list(warnings: list[dict]) -> None:
+    if not warnings:
+        return
+    typer.echo("Warnings:")
+    for warning in warnings:
+        if {"source_id", "path", "code", "message"}.issubset(warning):
+            line = f":{warning['line']}" if "line" in warning else ""
+            typer.echo(
+                f"- {warning['source_id']}:{warning['path']}{line} "
+                f"[{warning['code']}] {warning['message']}"
+            )
+        else:
+            typer.echo(f"- [{warning.get('code', 'warning')}] {warning.get('message', warning)}")
 
 
 def main() -> None:

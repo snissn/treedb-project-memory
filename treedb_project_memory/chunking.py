@@ -311,6 +311,9 @@ def _chunk_id(document: SourceDocument, chunk_index: int, content_hash: str) -> 
         [
             document.source_id,
             document.path,
+            document.document_kind,
+            str(document.start_line),
+            str(document.end_line),
             str(chunk_index),
             content_hash,
         ]
