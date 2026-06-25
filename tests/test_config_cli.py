@@ -19,6 +19,7 @@ def test_init_creates_expected_files_and_dirs(tmp_path, monkeypatch) -> None:
     config = yaml.safe_load(Path(".treedb-project-memory/config.yaml").read_text())
     assert config["workspace"] == "demo"
     assert config["sources"] == {}
+    assert config["answer_generator"]["provider"] is None
 
 
 def test_init_refuses_overwrite_unless_force(tmp_path, monkeypatch) -> None:
