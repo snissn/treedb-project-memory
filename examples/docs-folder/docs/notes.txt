@@ -1,0 +1,1 @@
+Project memory works best when source folders contain concise, readable notes.

@@ -1,0 +1,2 @@
+{"title":"Add smoke test","body":"The smoke test should create a temporary workspace and run quickstart commands."}
+{"title":"Document limitations","body":"The docs should clearly state that the memory adapter is process-local."}

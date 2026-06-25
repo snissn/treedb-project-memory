@@ -30,5 +30,11 @@ jobs:
       - name: Check CLI help
         run: treedb-project-memory --help
 
+      - name: Run quickstart smoke
+        run: scripts/quickstart_smoke.sh
+
+      - name: Check Markdown links
+        run: python scripts/check_markdown_links.py
+
       - name: Run tests
         run: pytest

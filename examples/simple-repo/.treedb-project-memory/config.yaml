@@ -1,0 +1,33 @@
+workspace: simple-repo-example
+sources:
+  app:
+    type: repo
+    root: ./sample-repo
+    include:
+      - "**/*.py"
+      - "**/*.md"
+    exclude:
+      - ".git/**"
+      - ".venv/**"
+      - "__pycache__/**"
+    max_file_bytes: 1048576
+    follow_symlinks: false
+retrieval:
+  default_mode: keyword
+  top_k: 5
+answer_generator:
+  provider: extractive
+  max_context_chunks: 3
+embedding:
+  provider: deterministic
+  model: deterministic-v1
+  dimension: 32
+  batch_size: 32
+treedb:
+  adapter: memory
+  base_url: http://127.0.0.1:7120
+  index: simple_repo_example
+  similarity: cosine
+  service_lifecycle: external
+  timeout_seconds: 30.0
+  ensure_index: true
