@@ -347,6 +347,62 @@ def test_status_reports_local_state_and_optional_adapter_health(tmp_path) -> Non
     assert report["treedb"]["health"]["ok"] is True
 
 
+def test_status_reports_stale_index_diagnostics(tmp_path) -> None:
+    workspace, config = make_workspace(tmp_path)
+    adapter = RecordingAdapter()
+    factory = adapter_factory(adapter)
+    index_workspace(workspace, config, adapter_factory=factory)
+    (tmp_path / "docs" / "guide.md").write_text("# Guide\nchanged\n", encoding="utf-8")
+
+    report = status_workspace(workspace, read_config(workspace), adapter_factory=factory)
+
+    assert report["changed_file_count"] == 1
+    warning = next(item for item in report["warnings"] if item["code"] == "stale_index")
+    assert warning["source_id"] == "docs"
+    assert warning["changed_files"] == 1
+    assert warning["reindex_command"] == "treedb-project-memory index"
+    assert warning["rebuild_command"] == "treedb-project-memory index --rebuild"
+
+
+def test_index_progress_events_cover_scan_embedding_upsert_and_done(tmp_path) -> None:
+    workspace, config = make_workspace(tmp_path)
+    adapter = RecordingAdapter()
+    events: list[dict[str, Any]] = []
+
+    index_workspace(
+        workspace,
+        config,
+        adapter_factory=adapter_factory(adapter),
+        progress_callback=events.append,
+    )
+
+    stages = [event["stage"] for event in events]
+    assert stages[0] == "start"
+    assert "scan_start" in stages
+    assert "scan_done" in stages
+    assert "embedding_start" in stages
+    assert "upsert_start" in stages
+    assert stages[-1] == "done"
+    assert events[-1]["upserted_chunks"] == 1
+
+
+def test_index_cancellation_stops_before_adapter_side_effects(tmp_path) -> None:
+    workspace, config = make_workspace(tmp_path)
+    adapter = RecordingAdapter()
+    checks = iter([False, False, True])
+
+    with pytest.raises(IndexingError, match="cancelled before adapter"):
+        index_workspace(
+            workspace,
+            config,
+            adapter_factory=adapter_factory(adapter),
+            cancellation_check=lambda: next(checks, True),
+        )
+
+    assert adapter.upsert_batches == []
+    assert not (workspace.state_dir / "index-state.json").exists()
+
+
 def test_status_check_service_reports_adapter_operation_errors(tmp_path) -> None:
     class FailingStatusAdapter(RecordingAdapter):
         def count_documents(self) -> int:

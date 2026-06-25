@@ -31,6 +31,8 @@ from .treedb_adapter import (
 
 ProviderFactory = Callable[[Any], EmbeddingProvider]
 AdapterFactory = Callable[..., TreeDBAdapter]
+ProgressCallback = Callable[[dict[str, Any]], None]
+CancellationCheck = Callable[[], bool]
 
 
 class IndexingError(Exception):
@@ -65,10 +67,19 @@ def index_workspace(
     rebuild: bool = False,
     provider_factory: ProviderFactory = create_embedding_provider,
     adapter_factory: AdapterFactory = create_treedb_adapter,
+    progress_callback: ProgressCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
 ) -> dict[str, Any]:
     """Index changed chunks into TreeDB and persist local incremental state."""
 
     started = time.perf_counter()
+    _check_cancelled(cancellation_check, "start")
+    _emit_progress(
+        progress_callback,
+        stage="start",
+        source_id=source_id,
+        rebuild=rebuild,
+    )
     sources = _select_sources(config, source_id)
     state = _load_state(workspace, config)
     _validate_state(state, config, rebuild=rebuild)
@@ -82,6 +93,8 @@ def index_workspace(
     warnings: list[dict[str, Any]] = []
 
     for source in sources:
+        _check_cancelled(cancellation_check, f"scan:{source.id}")
+        _emit_progress(progress_callback, stage="scan_start", source_id=source.id)
         scan = scan_source(source)
         planned_files = _planned_files(scan, config.workspace)
         previous_files = (
@@ -131,6 +144,18 @@ def index_workspace(
             source_unavailable=source_unavailable,
         )
         report_sources.append(source_report)
+        _emit_progress(
+            progress_callback,
+            stage="scan_done",
+            source_id=source.id,
+            files_scanned=scan.files_scanned,
+            documents=len(scan.documents),
+            chunks=source_report["chunks"],
+            changed_files=len(changed_paths),
+            unchanged_files=len(unchanged_paths),
+            deleted_files=len(deleted_paths),
+            warnings=len(scan_warnings),
+        )
         source_plans.append(
             {
                 "source": source,
@@ -141,29 +166,66 @@ def index_workspace(
             }
         )
 
+    _check_cancelled(cancellation_check, "adapter")
     adapter = _create_adapter(config, adapter_factory)
     index_documents: list[IndexDocument] = []
     indexed_at = _utc_now()
     if upsert_items:
+        _check_cancelled(cancellation_check, "embedding")
+        _emit_progress(
+            progress_callback,
+            stage="embedding_start",
+            chunks=len(upsert_items),
+            provider=config.embedding.provider,
+            model=config.embedding.model,
+        )
         provider = _create_provider(config, provider_factory)
         try:
             index_documents = _embed_index_documents(upsert_items, provider, indexed_at)
         except EmbeddingError as exc:
             raise IndexingError(str(exc)) from exc
+        _emit_progress(
+            progress_callback,
+            stage="embedding_done",
+            chunks=len(index_documents),
+        )
 
     unique_delete_ids = list(dict.fromkeys(delete_ids))
     deleted_chunks = 0
     upserted_chunks = 0
     try:
         if unique_delete_ids:
+            _check_cancelled(cancellation_check, "delete")
+            _emit_progress(
+                progress_callback,
+                stage="delete_start",
+                chunks=len(unique_delete_ids),
+            )
             deleted = adapter.delete_documents(unique_delete_ids)
             deleted_chunks = len(unique_delete_ids) if deleted is None else int(deleted)
+            _emit_progress(
+                progress_callback,
+                stage="delete_done",
+                chunks=deleted_chunks,
+            )
         if index_documents:
+            _check_cancelled(cancellation_check, "upsert")
+            _emit_progress(
+                progress_callback,
+                stage="upsert_start",
+                chunks=len(index_documents),
+            )
             upserted_chunks = adapter.upsert_documents(index_documents)
+            _emit_progress(
+                progress_callback,
+                stage="upsert_done",
+                chunks=upserted_chunks,
+            )
         adapter_document_count = adapter.count_documents()
     except TreeDBAdapterError as exc:
         raise IndexingError(str(exc)) from exc
 
+    _check_cancelled(cancellation_check, "state")
     if rebuild:
         state.reset_sources(target_source_ids)
     refresh_state_identity(state, config)
@@ -186,6 +248,13 @@ def index_workspace(
     save_index_state(workspace, state)
 
     elapsed = time.perf_counter() - started
+    _emit_progress(
+        progress_callback,
+        stage="done",
+        elapsed_seconds=elapsed,
+        upserted_chunks=upserted_chunks,
+        deleted_chunks=deleted_chunks,
+    )
     return _index_report(
         config=config,
         workspace=workspace,
@@ -242,6 +311,23 @@ def status_workspace(
         scan_warnings = [skip.to_json() for skip in scan.warnings()]
         warnings.extend(scan_warnings)
         indexed_chunks = sum(file.chunk_count for file in previous_files.values())
+        if changed_paths or deleted_paths:
+            warnings.append(
+                {
+                    "code": "stale_index",
+                    "source_id": source.id,
+                    "message": (
+                        f"source {source.id!r} has {len(changed_paths)} changed "
+                        f"and {len(deleted_paths)} deleted files since the last index; "
+                        "run 'treedb-project-memory index' to refresh or "
+                        "'treedb-project-memory index --rebuild' after rebuilding TreeDB"
+                    ),
+                    "changed_files": len(changed_paths),
+                    "deleted_files": len(deleted_paths),
+                    "reindex_command": "treedb-project-memory index",
+                    "rebuild_command": "treedb-project-memory index --rebuild",
+                }
+            )
         report_sources.append(
             {
                 "id": source.id,
@@ -483,6 +569,22 @@ def _embed_index_documents(
             )
         )
     return documents
+
+
+def _emit_progress(
+    progress_callback: ProgressCallback | None,
+    **event: Any,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(dict(event))
+
+
+def _check_cancelled(
+    cancellation_check: CancellationCheck | None,
+    stage: str,
+) -> None:
+    if cancellation_check is not None and cancellation_check():
+        raise IndexingError(f"indexing cancelled before {stage}")
 
 
 def _source_index_report(

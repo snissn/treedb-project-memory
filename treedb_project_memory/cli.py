@@ -6,6 +6,15 @@ import typer
 
 from . import __version__
 from .answers import AnswerError, ask_workspace
+from .benchmarks import (
+    FixtureShape,
+    generate_fixture_dataset,
+    run_ingest_benchmark,
+    run_retrieval_benchmark,
+    run_ui_smoke_benchmark,
+    temp_output_dir,
+    validate_fixture_dataset,
+)
 from .chunking import chunk_document
 from .config import (
     VALID_SOURCE_TYPES,
@@ -28,6 +37,11 @@ app = typer.Typer(
         "TreeDB/Haystack indexing."
     ),
 )
+benchmark_app = typer.Typer(
+    add_completion=False,
+    help="Run repeatable local benchmark and scale smoke harnesses.",
+)
+app.add_typer(benchmark_app, name="benchmark")
 
 
 def _version_callback(value: bool) -> None:
@@ -188,6 +202,11 @@ def index_command(
         "--json",
         help="Alias for --format json.",
     ),
+    progress: bool = typer.Option(
+        False,
+        "--progress",
+        help="Emit structured indexing progress events to stderr.",
+    ),
 ) -> None:
     """Scan configured sources and index changed chunks into TreeDB."""
     if json_output:
@@ -206,7 +225,11 @@ def index_command(
                 config,
                 source_id=source_id,
                 rebuild=rebuild,
+                progress_callback=_progress_event if progress else None,
             )
+    except KeyboardInterrupt:
+        typer.echo("Indexing cancelled.", err=True)
+        raise typer.Exit(130)
     except (WorkspaceError, IndexingError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
@@ -474,6 +497,131 @@ def ui(
         raise typer.BadParameter(str(exc)) from exc
 
 
+@benchmark_app.command("fixture")
+def benchmark_fixture(
+    output: Path = typer.Argument(..., help="Directory where fixture files are written."),
+    files: int = typer.Option(24, "--files", min=1, help="Markdown files to generate."),
+    paragraphs: int = typer.Option(
+        6,
+        "--paragraphs",
+        min=1,
+        help="Paragraphs per generated Markdown file.",
+    ),
+    jsonl_rows: int = typer.Option(
+        12,
+        "--jsonl-rows",
+        min=0,
+        help="Generated JSONL records.",
+    ),
+    words: int = typer.Option(
+        80,
+        "--words",
+        min=1,
+        help="Words per generated paragraph.",
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+) -> None:
+    """Generate and validate a deterministic benchmark fixture dataset."""
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    manifest = generate_fixture_dataset(
+        output,
+        FixtureShape(
+            file_count=files,
+            paragraphs_per_file=paragraphs,
+            jsonl_rows=jsonl_rows,
+            words_per_paragraph=words,
+        ),
+    )
+    validate_fixture_dataset(output)
+    if output_format == "json":
+        typer.echo(json.dumps(manifest, indent=2, sort_keys=True))
+        return
+    typer.echo(f"Fixture: {output}")
+    typer.echo(f"Files: {manifest['file_count']}")
+    typer.echo(f"Bytes: {manifest['total_bytes']}")
+    typer.echo(f"Manifest: {output / 'fixture-manifest.json'}")
+
+
+@benchmark_app.command("ingest")
+def benchmark_ingest(
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        help="Directory for fixture, workspaces, and benchmark reports.",
+    ),
+    files: int = typer.Option(24, "--files", min=1),
+    paragraphs: int = typer.Option(6, "--paragraphs", min=1),
+    jsonl_rows: int = typer.Option(12, "--jsonl-rows", min=0),
+    words: int = typer.Option(80, "--words", min=1),
+    runs: int = typer.Option(1, "--runs", min=1),
+    output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
+) -> None:
+    """Measure scan/chunk/embed/upsert ingest through the workspace services."""
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    out = output_dir or temp_output_dir("tpm_ingest_bench_")
+    report = run_ingest_benchmark(
+        out,
+        shape=FixtureShape(files, paragraphs, jsonl_rows, words),
+        runs=runs,
+    )
+    _print_benchmark_report(report, out, output_format)
+
+
+@benchmark_app.command("retrieval")
+def benchmark_retrieval(
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        help="Directory for fixture, workspace, and benchmark reports.",
+    ),
+    files: int = typer.Option(24, "--files", min=1),
+    paragraphs: int = typer.Option(6, "--paragraphs", min=1),
+    jsonl_rows: int = typer.Option(12, "--jsonl-rows", min=0),
+    words: int = typer.Option(80, "--words", min=1),
+    repetitions: int = typer.Option(10, "--repetitions", min=1),
+    query: list[str] = typer.Option(
+        [],
+        "--query",
+        help="Query to measure. Repeat for multiple queries.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
+) -> None:
+    """Measure keyword retrieval latency after indexing the generated fixture."""
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    out = output_dir or temp_output_dir("tpm_retrieval_bench_")
+    report = run_retrieval_benchmark(
+        out,
+        shape=FixtureShape(files, paragraphs, jsonl_rows, words),
+        queries=query or None,
+        repetitions=repetitions,
+    )
+    _print_benchmark_report(report, out, output_format)
+
+
+@benchmark_app.command("ui-smoke")
+def benchmark_ui_smoke(
+    output_dir: Optional[Path] = typer.Option(
+        None,
+        "--output-dir",
+        help="Directory for UI smoke reports.",
+    ),
+    output_format: str = typer.Option("text", "--format", help="Output format: text or json."),
+) -> None:
+    """Smoke the local UI server startup and static/health response latency."""
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    out = output_dir or temp_output_dir("tpm_ui_smoke_")
+    report = run_ui_smoke_benchmark(out)
+    _print_benchmark_report(report, out, output_format)
+
+
 def build_dry_run_report(config, source_id: str | None = None) -> dict:
     if source_id is not None and source_id not in config.sources:
         raise WorkspaceError(f"source ID '{source_id}' is not configured")
@@ -530,6 +678,33 @@ def build_dry_run_report(config, source_id: str | None = None) -> dict:
         "skip_count": total_skipped,
         "warnings": all_warnings,
     }
+
+
+def _progress_event(event: dict) -> None:
+    typer.echo(json.dumps(event, sort_keys=True), err=True)
+
+
+def _print_benchmark_report(report: dict, output_dir: Path, output_format: str) -> None:
+    if output_format == "json":
+        typer.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+    typer.echo(f"Benchmark: {report['benchmark']}")
+    typer.echo(f"Output: {output_dir}")
+    typer.echo(f"JSON: {output_dir / (report['benchmark'] + '_results.json')}")
+    typer.echo(f"Markdown: {output_dir / (report['benchmark'] + '_results.md')}")
+    if report["benchmark"] == "ingest":
+        summary = report["summary"]
+        typer.echo(f"Index avg seconds: {summary['index_elapsed_seconds_avg']:.6f}")
+        typer.echo(f"Index chunks/sec avg: {summary['index_chunks_per_second_avg']:.2f}")
+    elif report["benchmark"] == "retrieval":
+        for row in report["measurements"]:
+            typer.echo(
+                f"{row['mode']}\tquery={row['query']!r}\t"
+                f"p50={row['p50_seconds']:.6f}s\tp95={row['p95_seconds']:.6f}s"
+            )
+    elif report["benchmark"] == "ui-smoke":
+        for path, row in report["requests"].items():
+            typer.echo(f"{path}\tstatus={row['status']}\telapsed={row['elapsed_seconds']:.6f}s")
 
 
 def _print_dry_run_report(report: dict) -> None:
