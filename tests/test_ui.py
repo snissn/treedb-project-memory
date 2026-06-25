@@ -186,6 +186,12 @@ def test_citation_rendering_uses_text_content_not_html_injection() -> None:
     assert "#citation?" in APP_JS
 
 
+def test_status_fetch_renders_diagnostic_not_ok_payloads() -> None:
+    assert "allowNotOkPayload = false" in APP_JS
+    assert 'requestJson("/api/status", { allowNotOkPayload: true })' in APP_JS
+    assert "(!allowNotOkPayload && payload.ok === false)" in APP_JS
+
+
 def test_trace_response_renders_trace_contract() -> None:
     with running_server(FixtureBackend()) as base_url:
         _status, payload = post_json(

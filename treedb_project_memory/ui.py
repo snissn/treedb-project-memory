@@ -739,12 +739,13 @@ function citationHref(citation) {
 }
 
 async function requestJson(url, options = {}) {
+  const { allowNotOkPayload = false, ...fetchOptions } = options;
   const response = await fetch(url, {
     headers: { "Content-Type": "application/json" },
-    ...options,
+    ...fetchOptions,
   });
   const payload = await response.json();
-  if (!response.ok || payload.ok === false) {
+  if (!response.ok || (!allowNotOkPayload && payload.ok === false)) {
     const message = payload.error && payload.error.message ? payload.error.message : "Request failed";
     throw new Error(message);
   }
@@ -760,7 +761,7 @@ function setConnection(ok, label) {
 
 async function loadStatus() {
   try {
-    const payload = await requestJson("/api/status");
+    const payload = await requestJson("/api/status", { allowNotOkPayload: true });
     state.lastStatus = payload.status;
     renderStatus(payload);
     setConnection(true, "Ready");
