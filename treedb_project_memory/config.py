@@ -24,6 +24,8 @@ VALID_EMBEDDING_PROVIDERS = {
 VALID_TREEDB_SIMILARITIES = {"cosine", "l2", "inner_product"}
 VALID_TREEDB_SERVICE_LIFECYCLES = {"external"}
 VALID_TREEDB_ADAPTERS = {"haystack", "memory"}
+VALID_RETRIEVAL_MODES = {"semantic", "keyword", "hybrid"}
+VALID_ANSWER_GENERATORS = {"extractive"}
 
 DEFAULT_MAX_FILE_BYTES = 1_048_576
 DEFAULT_FOLLOW_SYMLINKS = False
@@ -39,6 +41,9 @@ DEFAULT_TREEDB_INDEX = "project_memory"
 DEFAULT_TREEDB_SIMILARITY = "cosine"
 DEFAULT_TREEDB_TIMEOUT_SECONDS = 30.0
 DEFAULT_TREEDB_SERVICE_LIFECYCLE = "external"
+DEFAULT_RETRIEVAL_MODE = "hybrid"
+DEFAULT_RETRIEVAL_TOP_K = 8
+DEFAULT_ANSWER_MAX_CONTEXT_CHUNKS = 4
 
 DEFAULT_INCLUDE = {
     "repo": ["**/*.py", "**/*.js", "**/*.ts", "**/*.md", "**/*.txt"],
@@ -176,12 +181,41 @@ class TreeDBConfig:
 
 
 @dataclass
+class RetrievalConfig:
+    default_mode: str = DEFAULT_RETRIEVAL_MODE
+    top_k: int = DEFAULT_RETRIEVAL_TOP_K
+
+    def to_yaml(self) -> dict[str, Any]:
+        return {
+            "default_mode": self.default_mode,
+            "top_k": self.top_k,
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        return self.to_yaml()
+
+
+@dataclass
+class AnswerGeneratorConfig:
+    provider: str | None = None
+    max_context_chunks: int = DEFAULT_ANSWER_MAX_CONTEXT_CHUNKS
+
+    def to_yaml(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "max_context_chunks": self.max_context_chunks,
+        }
+
+    def to_json(self) -> dict[str, Any]:
+        return self.to_yaml()
+
+
+@dataclass
 class ProjectConfig:
     workspace: str
     sources: dict[str, SourceConfig] = field(default_factory=dict)
-    retrieval: dict[str, Any] = field(
-        default_factory=lambda: {"default_mode": "hybrid", "top_k": 8}
-    )
+    retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
+    answer_generator: AnswerGeneratorConfig = field(default_factory=AnswerGeneratorConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     treedb: TreeDBConfig = field(default_factory=TreeDBConfig)
 
@@ -243,16 +277,13 @@ class ProjectConfig:
                 content_field=content_field if source_type == "jsonl" else None,
             )
 
-        retrieval = data.get("retrieval", {})
-        if retrieval is None:
-            retrieval = {}
-        if not isinstance(retrieval, dict):
-            raise ValidationError("retrieval must be a mapping")
-
         return cls(
             workspace=workspace,
             sources=sources,
-            retrieval=dict(retrieval),
+            retrieval=validate_retrieval_config(data.get("retrieval")),
+            answer_generator=validate_answer_generator_config(
+                data.get("answer_generator")
+            ),
             embedding=validate_embedding_config(data.get("embedding")),
             treedb=validate_treedb_config(data.get("treedb")),
         )
@@ -264,7 +295,8 @@ class ProjectConfig:
                 source_id: source.to_yaml()
                 for source_id, source in sorted(self.sources.items())
             },
-            "retrieval": dict(self.retrieval),
+            "retrieval": self.retrieval.to_yaml(),
+            "answer_generator": self.answer_generator.to_yaml(),
             "embedding": self.embedding.to_yaml(),
             "treedb": self.treedb.to_yaml(),
         }
@@ -534,6 +566,63 @@ def validate_treedb_config(value: Any) -> TreeDBConfig:
         service_lifecycle=service_lifecycle,
         timeout_seconds=timeout_seconds,
         ensure_index=ensure_index,
+    )
+
+
+def validate_retrieval_config(value: Any) -> RetrievalConfig:
+    if value is None:
+        return RetrievalConfig()
+    if not isinstance(value, dict):
+        raise ValidationError("retrieval must be a mapping")
+    allowed = {"default_mode", "top_k"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValidationError(f"retrieval has unsupported field(s): {', '.join(unknown)}")
+
+    mode = value.get("default_mode", DEFAULT_RETRIEVAL_MODE)
+    if not isinstance(mode, str):
+        raise ValidationError("retrieval.default_mode must be a string")
+    mode = mode.strip().lower()
+    if mode not in VALID_RETRIEVAL_MODES:
+        valid = ", ".join(sorted(VALID_RETRIEVAL_MODES))
+        raise ValidationError(f"retrieval.default_mode must be one of: {valid}")
+
+    return RetrievalConfig(
+        default_mode=mode,
+        top_k=validate_positive_int(
+            value.get("top_k", DEFAULT_RETRIEVAL_TOP_K),
+            "retrieval.top_k",
+        ),
+    )
+
+
+def validate_answer_generator_config(value: Any) -> AnswerGeneratorConfig:
+    if value is None:
+        return AnswerGeneratorConfig()
+    if not isinstance(value, dict):
+        raise ValidationError("answer_generator must be a mapping")
+    allowed = {"provider", "max_context_chunks"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValidationError(
+            f"answer_generator has unsupported field(s): {', '.join(unknown)}"
+        )
+
+    provider = value.get("provider")
+    if provider is not None:
+        if not isinstance(provider, str) or not provider.strip():
+            raise ValidationError("answer_generator.provider must be a string or null")
+        provider = provider.strip().lower()
+        if provider not in VALID_ANSWER_GENERATORS:
+            valid = ", ".join(sorted(VALID_ANSWER_GENERATORS))
+            raise ValidationError(f"answer_generator.provider must be one of: {valid}")
+
+    return AnswerGeneratorConfig(
+        provider=provider,
+        max_context_chunks=validate_positive_int(
+            value.get("max_context_chunks", DEFAULT_ANSWER_MAX_CONTEXT_CHUNKS),
+            "answer_generator.max_context_chunks",
+        ),
     )
 
 

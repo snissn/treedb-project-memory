@@ -5,6 +5,7 @@ from typing import Optional
 import typer
 
 from . import __version__
+from .answers import AnswerError, ask_workspace
 from .chunking import chunk_document
 from .config import (
     VALID_SOURCE_TYPES,
@@ -16,6 +17,7 @@ from .config import (
     read_config,
 )
 from .indexing import IndexingError, index_workspace, status_workspace
+from .retrieval import RetrievalError, search_workspace
 from .sources import scan_source
 
 app = typer.Typer(
@@ -263,6 +265,140 @@ def status(
 
 
 @app.command()
+def search(
+    query: str = typer.Argument(..., help="Query text to retrieve from indexed documents."),
+    mode: Optional[str] = typer.Option(
+        None,
+        "--mode",
+        help="Retrieval mode: semantic, keyword, or hybrid. Defaults to config retrieval.default_mode.",
+    ),
+    top_k: Optional[int] = typer.Option(
+        None,
+        "--top-k",
+        help="Maximum number of retrieval results. Defaults to config retrieval.top_k.",
+    ),
+    source_id: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help="Filter to one configured source ID when the selected retriever supports it.",
+    ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help="Include retrieval trace details.",
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Alias for --format json.",
+    ),
+) -> None:
+    """Retrieve cited indexed chunks without requiring an answer generator."""
+    if json_output:
+        output_format = "json"
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    try:
+        workspace = discover_workspace()
+        config = read_config(workspace)
+        results, trace = search_workspace(
+            workspace,
+            config,
+            query=query,
+            mode=mode,
+            top_k=top_k,
+            source_id=source_id,
+        )
+    except (WorkspaceError, RetrievalError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    payload = {
+        "query": query,
+        "mode": trace.mode,
+        "results": [result.to_json() for result in results],
+    }
+    if explain:
+        payload["trace"] = trace.to_json()
+    if output_format == "json":
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    _print_search_results(payload, explain=explain)
+
+
+@app.command()
+def ask(
+    query: str = typer.Argument(..., help="Question to answer from indexed documents."),
+    mode: Optional[str] = typer.Option(
+        None,
+        "--mode",
+        help="Retrieval mode: semantic, keyword, or hybrid. Defaults to config retrieval.default_mode.",
+    ),
+    top_k: Optional[int] = typer.Option(
+        None,
+        "--top-k",
+        help="Maximum number of retrieval results. Defaults to config retrieval.top_k.",
+    ),
+    source_id: Optional[str] = typer.Option(
+        None,
+        "--source",
+        help="Filter to one configured source ID when the selected retriever supports it.",
+    ),
+    explain: bool = typer.Option(
+        False,
+        "--explain",
+        help="Include retrieval trace details.",
+    ),
+    output_format: str = typer.Option(
+        "text",
+        "--format",
+        help="Output format: text or json.",
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Alias for --format json.",
+    ),
+) -> None:
+    """Answer from retrieved indexed chunks when a generator is configured."""
+    if json_output:
+        output_format = "json"
+    if output_format not in {"text", "json"}:
+        raise typer.BadParameter("--format must be 'text' or 'json'")
+    try:
+        workspace = discover_workspace()
+        config = read_config(workspace)
+        answer = ask_workspace(
+            workspace,
+            config,
+            query=query,
+            mode=mode,
+            top_k=top_k,
+            source_id=source_id,
+        )
+    except (WorkspaceError, RetrievalError, AnswerError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    payload = answer.to_json()
+    if not explain:
+        payload.pop("trace", None)
+    if output_format == "json":
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    typer.echo(answer.answer)
+    if answer.citations:
+        typer.echo("Citations:")
+        for citation in answer.citations:
+            typer.echo(f"- {citation['label']}")
+    if explain:
+        _print_trace(answer.trace.to_json())
+
+
+@app.command()
 def doctor(
     output_format: str = typer.Option(
         "text",
@@ -439,6 +575,35 @@ def _print_status_report(report: dict) -> None:
             f"warnings={len(source['warnings'])}"
         )
     _print_warning_list(report.get("warnings", []))
+
+
+def _print_search_results(payload: dict, *, explain: bool) -> None:
+    typer.echo(f"Search mode: {payload['mode']}")
+    for index, result in enumerate(payload["results"], start=1):
+        citation = result.get("citation") or {}
+        label = citation.get("label") or result["id"]
+        score = "n/a" if result["score"] is None else f"{result['score']:.6g}"
+        typer.echo(f"{index}. {result['id']} score={score} citation={label}")
+        content = result.get("content", "").strip().replace("\n", " ")
+        if content:
+            typer.echo(f"   {content[:240]}")
+    if explain and "trace" in payload:
+        _print_trace(payload["trace"])
+
+
+def _print_trace(trace: dict) -> None:
+    typer.echo("Retrieval trace")
+    typer.echo(f"Query: {trace['query']}")
+    typer.echo(f"Mode: {trace['mode']}")
+    typer.echo(f"Top K: {trace['top_k']}")
+    typer.echo(f"Filters: {json.dumps(trace['filters'], sort_keys=True)}")
+    typer.echo(f"Document IDs: {', '.join(trace['document_ids'])}")
+    typer.echo(f"Scores: {trace['scores']}")
+    if trace["citations"]:
+        typer.echo("Selected citations:")
+        for citation in trace["citations"]:
+            typer.echo(f"- {citation['label']}")
+    typer.echo(f"Details: {json.dumps(trace['details'], sort_keys=True)}")
 
 
 def _print_warning_list(warnings: list[dict]) -> None:

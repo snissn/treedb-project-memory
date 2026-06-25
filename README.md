@@ -5,10 +5,11 @@ source material: repositories, folders, docs, notes, exports, and other local
 knowledge sources.
 
 The intended product is described in [spec.md](spec.md). This repository now
-contains the bounded indexing MVP: workspace-local YAML config commands, source
-scanning, chunking, deterministic test embeddings, optional embedding providers,
-a TreeDB/Haystack adapter boundary, a self-contained memory adapter for smoke
-tests, incremental local index state, and status/doctor diagnostics.
+contains the bounded indexing and retrieval MVP: workspace-local YAML config
+commands, source scanning, chunking, deterministic test embeddings, optional
+embedding providers, a TreeDB/Haystack adapter boundary, a self-contained memory
+adapter for smoke tests, incremental local index state, cited search, optional
+ask, retrieval traces, and status/doctor diagnostics.
 
 ## Status
 
@@ -34,6 +35,11 @@ Implemented now:
   `.treedb-project-memory/state/index-state.json`.
 - `status` reports local index state and optionally checks the configured
   adapter.
+- `search` retrieves cited indexed chunks without requiring an answer generator.
+- `ask` uses retrieval plus a configured answer generator, or fails clearly when
+  no generator is configured.
+- Retrieval traces show query mode, filters, document IDs, scores, citations,
+  and adapter timing details through `--explain`.
 - Deterministic embeddings for self-contained CI and smoke tests.
 - Optional local `sentence-transformers` embeddings through a dynamic import.
 - Optional OpenAI-compatible remote embeddings through direct HTTP calls.
@@ -46,7 +52,7 @@ Implemented now:
 
 Not implemented yet:
 
-- Search, ask, retrieval-time citations, UI, or advanced diagnostics.
+- UI or advanced diagnostics.
 - Retrieval/search emulation, ANN claims, or high-QPS performance claims.
 
 ## Development Setup
@@ -91,12 +97,21 @@ The current CLI guarantees:
   index state.
 - `treedb-project-memory status --check-service` also instantiates the selected
   adapter and reports health/count when available.
+- `treedb-project-memory search <query>` retrieves cited chunks from the
+  configured index without requiring an answer generator.
+- `treedb-project-memory search <query> --json --explain` emits parseable
+  results plus the retrieval trace.
+- `treedb-project-memory ask <question>` requires
+  `answer_generator.provider` to be configured. Without it, the command fails
+  clearly and points users to `search`.
+- `treedb-project-memory ask <question> --json --explain` emits the generated
+  cited answer, supporting results, and retrieval trace.
 - `treedb-project-memory doctor --format json` emits parseable config, root,
   optional dependency, and configured service diagnostics.
 
-Future issues will add retrieval, search, answer generation, and richer
-inspection commands. Until those issues land, documentation and PRs should not
-claim those workflows are implemented.
+Future issues will add UI workflows, packaging polish, scale evidence, and
+richer inspection commands. Until those issues land, documentation and PRs
+should not claim those workflows are implemented.
 
 Example config:
 
@@ -124,6 +139,9 @@ sources:
 retrieval:
   default_mode: hybrid
   top_k: 8
+answer_generator:
+  provider: null
+  max_context_chunks: 4
 embedding:
   provider: deterministic
   model: deterministic-v1
@@ -187,6 +205,60 @@ The memory adapter validates document dimensions and exercises the same
 upsert/delete boundary, but it does not persist documents across CLI processes.
 The local index state file is still written, so `status` can report source/index
 freshness after the smoke run.
+
+## Search, Ask, And Retrieval Traces
+
+Retrieval modes are explicit:
+
+- `keyword` scores text matches without embedding the query.
+- `semantic` embeds the query and asks the adapter for vector retrieval.
+- `hybrid` combines keyword and semantic scoring only where the selected adapter
+  supports it.
+
+Unsupported modes, filters, and adapter combinations fail clearly. In
+particular, this project does not silently fetch every document and filter or
+rank it client-side to emulate unsupported TreeDB/Haystack capabilities. Source
+filtering is only passed to retrievers that support source metadata filters.
+
+Search does not require an answer generator:
+
+```sh
+treedb-project-memory search "workspace indexing" --mode keyword --explain
+```
+
+JSON output is available for automation:
+
+```sh
+treedb-project-memory search "workspace indexing" --mode keyword --json --explain
+```
+
+`ask` uses the same retrieval path, then calls the configured answer generator.
+The default config intentionally has no generator:
+
+```text
+ask requires answer_generator.provider to be configured; search works without an answer generator
+```
+
+For self-contained local use and tests, the deterministic `extractive` generator
+can be enabled:
+
+```yaml
+answer_generator:
+  provider: extractive
+  max_context_chunks: 4
+```
+
+The extractive generator formats snippets from retrieved chunks with citations.
+It is not a hosted LLM default.
+
+`--explain` includes the query, retrieval mode, filters, requested `top_k`,
+retrieved document IDs, scores, selected citations, adapter/index identity,
+whether query embeddings were used, and retrieval elapsed seconds.
+
+The real `treedb.adapter: haystack` path imports TreeDB/Haystack components only
+when selected. Retrieval requires upstream retriever components. If those
+components are missing or a selected mode is unsupported, commands fail with an
+explicit capability error instead of falling back.
 
 Example dry run:
 
