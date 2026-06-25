@@ -21,11 +21,12 @@ Implemented now:
   embeddings, and optional OpenAI-compatible embeddings;
 - TreeDB/Haystack adapter integration through optional upstream packages;
 - self-contained `memory` adapter for smoke tests and in-process tests;
-- cited search, optional extractive ask, and retrieval traces.
+- cited search, optional extractive ask, and retrieval traces;
+- dependency-free local UI console with status, diagnostics, search, ask,
+  citations, and trace views.
 
 Not implemented yet:
 
-- local UI docs or workflows;
 - hosted service, cloud sync, team accounts, or editor integration;
 - ANN/high-QPS performance claims;
 - public release automation.
@@ -106,6 +107,7 @@ treedb-project-memory ask "What does the guide say?" --mode keyword --explain
 - [Source types](docs/source-types.md)
 - [Metadata schema](docs/metadata-schema.md)
 - [Local TreeDB service](docs/local-service.md)
+- [Local UI](docs/ui.md)
 - [Development setup](docs/development.md)
 - [Packaging](docs/packaging.md)
 - [Limitations](docs/limitations.md)

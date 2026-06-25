@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -17,6 +18,7 @@ DOC_FILES = [
     ROOT / "docs" / "source-types.md",
     ROOT / "docs" / "metadata-schema.md",
     ROOT / "docs" / "local-service.md",
+    ROOT / "docs" / "ui.md",
     ROOT / "docs" / "development.md",
     ROOT / "docs" / "packaging.md",
     ROOT / "docs" / "limitations.md",
@@ -36,7 +38,7 @@ def test_example_dry_runs_produce_chunks() -> None:
     for path in EXAMPLE_CONFIGS:
         result = subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "treedb_project_memory",
                 "index",
@@ -55,13 +57,11 @@ def test_example_dry_runs_produce_chunks() -> None:
         assert payload["chunk_count"] > 0
 
 
-def test_docs_do_not_use_private_demo_paths_or_claim_ui() -> None:
+def test_docs_do_not_use_private_demo_paths() -> None:
     banned = [
         "/Users/michaelseiler",
         "/Users/snissn",
         "gomap",
-        "docs/ui.md",
-        "treedb-project-memory ui",
     ]
     for path in DOC_FILES:
         text = path.read_text(encoding="utf-8")

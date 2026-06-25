@@ -36,6 +36,7 @@ Current tests cover:
 - source scanning and chunking;
 - indexing state and adapter boundaries;
 - retrieval, citations, and ask behavior;
+- local UI startup, rendering, diagnostics, citations, and trace payloads;
 - docs/example config validation.
 
 Add tests when changing user-visible CLI behavior or config schema. Docs-only

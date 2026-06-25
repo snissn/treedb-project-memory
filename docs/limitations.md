@@ -15,7 +15,8 @@ Known limitations:
 - Source filtering is only passed to retrievers that support source metadata
   filters; unsupported combinations fail clearly.
 - There are no ANN/high-QPS claims or scale guarantees yet.
-- There is no local UI documentation or workflow in this docs set.
+- The local UI is a single-user inspection console, not a hosted or production
+  web server.
 - There is no hosted service, cloud sync, team workspace, auth system, file
   watcher, editor integration, or connector marketplace.
 - There is no public release automation or selected open-source license.
